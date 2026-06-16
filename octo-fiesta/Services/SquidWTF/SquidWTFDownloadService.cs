@@ -3,8 +3,8 @@ using System.Text.Json;
 using octo_fiesta.Models.Domain;
 using octo_fiesta.Models.Settings;
 using octo_fiesta.Models.SquidWTF;
-using octo_fiesta.Services.Common;
 using octo_fiesta.Services.Local;
+using octo_fiesta.Services.Common;
 using Microsoft.Extensions.Options;
 using IOFile = System.IO.File;
 
@@ -20,7 +20,6 @@ public class SquidWTFDownloadService : BaseDownloadService
     private readonly HttpClient _httpClient;
     private readonly SquidWTFSettings _squidWTFSettings;
     private readonly SquidWTFInstanceManager _instanceManager;
-    private readonly SquidWTFCaptchaSolver _captchaSolver;
     
     // Static Qobuz API endpoint
     private const string QobuzBaseUrl = "https://qobuz.kennyy.com.br";
@@ -47,7 +46,6 @@ public class SquidWTFDownloadService : BaseDownloadService
         IOptions<SubsonicSettings> subsonicSettings,
         IOptions<SquidWTFSettings> squidWTFSettings,
         SquidWTFInstanceManager instanceManager,
-        SquidWTFCaptchaSolver captchaSolver,
         IServiceProvider serviceProvider,
         ILogger<SquidWTFDownloadService> logger)
         : base(httpClientFactory, configuration, localLibraryService, metadataService, subsonicSettings.Value, serviceProvider, logger)
@@ -55,7 +53,6 @@ public class SquidWTFDownloadService : BaseDownloadService
         _httpClient = httpClientFactory.CreateClient();
         _squidWTFSettings = squidWTFSettings.Value;
         _instanceManager = instanceManager;
-        _captchaSolver = captchaSolver;
     }
 
     #region BaseDownloadService Implementation
@@ -131,27 +128,17 @@ public class SquidWTFDownloadService : BaseDownloadService
 
     private async Task<DownloadResult> DownloadTrackQobuzAsync(string trackId, Song song, CancellationToken cancellationToken)
     {
+        // Get download URL
         var quality = GetQobuzQuality();
         var url = $"{QobuzBaseUrl}/api/download-music?track_id={trackId}&quality={quality}";
-
-        var response = await SendQobuzDownloadRequestAsync(url, forceCaptchaRefresh: false, cancellationToken);
-
-        // Cached captcha cookie may be stale (>30 min server-side); refresh on 403 and retry once.
-        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
-        {
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            if (body.Contains("Captcha required", StringComparison.OrdinalIgnoreCase))
-            {
-                response.Dispose();
-                Logger.LogInformation("SquidWTF Qobuz captcha required, refreshing session and retrying");
-                response = await SendQobuzDownloadRequestAsync(url, forceCaptchaRefresh: true, cancellationToken);
-            }
-        }
-
+        
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add(QobuzCountryHeader, QobuzCountryValue);
+        
+        var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
-
+        
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        response.Dispose();
         var downloadResponse = JsonSerializer.Deserialize<QobuzDownloadResponse>(json);
         
         if (downloadResponse?.Success != true || string.IsNullOrEmpty(downloadResponse.Data?.Url))
@@ -176,15 +163,6 @@ public class SquidWTFDownloadService : BaseDownloadService
         };
 
         return new DownloadResult(downloadStream, extension, downloadedQuality);
-    }
-
-    private async Task<HttpResponseMessage> SendQobuzDownloadRequestAsync(string url, bool forceCaptchaRefresh, CancellationToken cancellationToken)
-    {
-        var cookie = await _captchaSolver.GetCaptchaCookieAsync(QobuzBaseUrl, forceCaptchaRefresh, cancellationToken);
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add(QobuzCountryHeader, QobuzCountryValue);
-        request.Headers.Add("Cookie", cookie);
-        return await _httpClient.SendAsync(request, cancellationToken);
     }
 
     private string GetQobuzQuality()
@@ -216,47 +194,27 @@ public class SquidWTFDownloadService : BaseDownloadService
     {
         var requestedQuality = GetTidalQuality();
         var (manifest, actualQuality) = await GetTidalManifestAsync(trackId, requestedQuality, cancellationToken);
-
+        
         if (manifest?.Urls == null || manifest.Urls.Count == 0)
         {
             throw new Exception("No download URLs in Tidal manifest");
         }
+        
+        var downloadUrl = manifest.Urls[0];
+        Logger.LogInformation("Got download URL for track {TrackId}: {Title} (quality: {Quality})", trackId, song.Title, actualQuality);
 
-        Stream downloadStream;
-        if (manifest.Urls.Count > 1)
-        {
-            Logger.LogInformation(
-                "Downloading {SegmentCount} DASH segments for track {TrackId}: {Title} (quality: {Quality}, codecs: {Codecs})",
-                manifest.Urls.Count, trackId, song.Title, actualQuality, manifest.Codecs ?? "?");
-            downloadStream = new MultiSegmentHttpStream(_httpClient, manifest.Urls);
-        }
-        else
-        {
-            Logger.LogInformation(
-                "Got download URL for track {TrackId}: {Title} (quality: {Quality})",
-                trackId, song.Title, actualQuality);
-            downloadStream = await GetDownloadStreamAsync(manifest.Urls[0], cancellationToken);
-        }
-
-        var extension = GetExtensionFromMimeType(manifest.MimeType, manifest.Codecs);
-        var downloadedQuality = GetDownloadedQuality(actualQuality, manifest.MimeType, manifest.Codecs);
-
-        // fMP4 (FLAC-in-MP4 DASH) assembles into a file whose moov duration is 0; pass the
-        // known duration so it can be patched, otherwise scanners report 0:00. (see #251)
-        var mp4Duration = extension == ".m4a"
-            ? manifest.DurationSeconds ?? (double?)song.Duration
-            : null;
-
-        return new DownloadResult(downloadStream, extension, downloadedQuality, mp4Duration);
+        Stream downloadStream = await GetDownloadStreamAsync(downloadUrl, cancellationToken);        
+        var extension = GetExtensionFromMimeType(manifest.MimeType);
+        var downloadedQuality = GetDownloadedQuality(actualQuality, manifest.MimeType);
+        
+        return new DownloadResult(downloadStream, extension, downloadedQuality);
     }
 
     /// <summary>
-    /// Gets the Tidal manifest. Handles both the legacy BTS JSON manifest and the
-    /// DASH MPD manifest now served for HI_RES_LOSSLESS — DASH segments are flattened
-    /// into the same <see cref="TidalManifest.Urls"/> list (init segment first).
-    /// Uses the instance manager for automatic failover.
+    /// Gets the Tidal manifest, falling back to LOSSLESS if HI_RES_LOSSLESS returns DASH format
+    /// Uses instance manager for automatic failover
     /// </summary>
-    internal async Task<(TidalManifest? manifest, string quality)> GetTidalManifestAsync(
+    private async Task<(TidalManifest? manifest, string quality)> GetTidalManifestAsync(
         string trackId, string quality, CancellationToken cancellationToken)
     {
         var response = await _instanceManager.SendWithFailoverAsync(baseUrl =>
@@ -265,50 +223,35 @@ public class SquidWTFDownloadService : BaseDownloadService
             request.Headers.Add(TidalClientHeader, TidalClientValue);
             return request;
         }, cancellationToken);
-
+        
         response.EnsureSuccessStatusCode();
-
+        
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
         var wrapper = JsonSerializer.Deserialize<TidalTrackDownloadResponseWrapper>(json);
         var trackResponse = wrapper?.Data;
-
+        
         if (string.IsNullOrEmpty(trackResponse?.Manifest))
         {
             throw new Exception("Failed to get manifest from SquidWTF Tidal");
         }
-
-        var manifestBytes = Convert.FromBase64String(trackResponse.Manifest);
-        var manifestText = Encoding.UTF8.GetString(manifestBytes);
+        
+        // Check if manifest is DASH (XML) format - not supported, need to fallback to LOSSLESS
         var manifestMimeType = trackResponse.ManifestMimeType ?? "";
-
         if (manifestMimeType.Contains("dash+xml") || manifestMimeType.Contains("application/dash"))
         {
-            try
+            if (quality == "HI_RES_LOSSLESS")
             {
-                var parsed = TidalDashManifestParser.Parse(manifestText);
-                Logger.LogInformation(
-                    "Parsed DASH manifest for track {TrackId}: {SegmentCount} segments, codecs={Codecs}",
-                    trackId, parsed.Urls.Count, parsed.Codecs);
-                var manifest = new TidalManifest
-                {
-                    MimeType = parsed.MimeType ?? "audio/mp4",
-                    Codecs = parsed.Codecs,
-                    Urls = parsed.Urls.ToList(),
-                    DurationSeconds = parsed.DurationSeconds,
-                };
-                return (manifest, quality);
-            }
-            catch (Exception ex) when (quality == "HI_RES_LOSSLESS")
-            {
-                Logger.LogWarning(ex,
-                    "Failed to parse HI_RES_LOSSLESS DASH manifest for track {TrackId}, falling back to LOSSLESS",
-                    trackId);
+                Logger.LogWarning("HI_RES_LOSSLESS returned DASH format for track {TrackId}, falling back to LOSSLESS", trackId);
                 return await GetTidalManifestAsync(trackId, "LOSSLESS", cancellationToken);
             }
+            throw new Exception($"Unsupported manifest format: {manifestMimeType}");
         }
-
-        var jsonManifest = JsonSerializer.Deserialize<TidalManifest>(manifestText);
-        return (jsonManifest, quality);
+        
+        // Decode the base64 manifest (JSON format)
+        var manifestJson = Encoding.UTF8.GetString(Convert.FromBase64String(trackResponse.Manifest));
+        var manifest = JsonSerializer.Deserialize<TidalManifest>(manifestJson);
+        
+        return (manifest, quality);
     }
 
     private string GetTidalQuality()
@@ -336,15 +279,13 @@ public class SquidWTFDownloadService : BaseDownloadService
     #region Helpers
 
     /// <summary>
-    /// Determines file extension based on the manifest's mime type and codecs.
-    /// FLAC-in-MP4 (DASH HI_RES_LOSSLESS) keeps the .m4a container — the audio is lossless
-    /// but the bytes are fragmented MP4, not raw FLAC, so renaming to .flac would mislead players.
+    /// Determines file extension based on the manifest's mime type
     /// </summary>
-    private static string GetExtensionFromMimeType(string? mimeType, string? codecs = null)
+    private static string GetExtensionFromMimeType(string? mimeType)
     {
         if (string.IsNullOrEmpty(mimeType))
             return ".mp3";
-
+            
         return mimeType.ToLowerInvariant() switch
         {
             var m when m.Contains("flac") => ".flac",
@@ -355,18 +296,16 @@ public class SquidWTFDownloadService : BaseDownloadService
     }
 
     /// <summary>
-    /// Determines the quality string for the downloaded file. When codecs indicate FLAC
-    /// inside an MP4 container (DASH HI_RES_LOSSLESS), we report FLAC quality rather than AAC.
+    /// Determines the quality string for the downloaded file
     /// </summary>
-    private static string GetDownloadedQuality(string requestedQuality, string? mimeType, string? codecs = null)
+    private static string GetDownloadedQuality(string requestedQuality, string? mimeType)
     {
-        var hasFlacCodec = codecs?.Contains("flac", StringComparison.OrdinalIgnoreCase) == true;
-
-        if (mimeType?.Contains("flac", StringComparison.OrdinalIgnoreCase) == true || hasFlacCodec)
+        if (mimeType?.Contains("flac", StringComparison.OrdinalIgnoreCase) == true)
         {
             return requestedQuality == "HI_RES_LOSSLESS" ? "FLAC_24" : "FLAC_16";
         }
-
+        
+        // AAC/M4A from Tidal - determine bitrate based on requested quality
         if (mimeType?.Contains("mp4", StringComparison.OrdinalIgnoreCase) == true ||
             mimeType?.Contains("aac", StringComparison.OrdinalIgnoreCase) == true)
         {
@@ -374,10 +313,10 @@ public class SquidWTFDownloadService : BaseDownloadService
             {
                 "HIGH" => "AAC_320",
                 "LOW" => "AAC_96",
-                _ => "AAC_320"
+                _ => "AAC_320"  // Default if we got AAC but didn't specifically request it
             };
         }
-
+        
         return "MP3_320";
     }
 
@@ -386,113 +325,12 @@ public class SquidWTFDownloadService : BaseDownloadService
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("User-Agent", "Mozilla/5.0");
         request.Headers.Add("Accept", "*/*");
-
+        
         var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
-
+        
         return await HttpResponseStream.CreateAsync(response, cancellationToken);
     }
 
     #endregion
-
-    /// <summary>
-    /// Read-only forward Stream that concatenates the bodies of multiple HTTP GETs.
-    /// Used for DASH downloads: init segment + N media segments must be reassembled in order.
-    /// </summary>
-    internal sealed class MultiSegmentHttpStream : Stream
-    {
-        private readonly HttpClient _http;
-        private readonly IReadOnlyList<string> _urls;
-        private int _index = -1;
-        private HttpResponseMessage? _currentResponse;
-        private Stream? _currentStream;
-
-        public MultiSegmentHttpStream(HttpClient http, IReadOnlyList<string> urls)
-        {
-            _http = http ?? throw new ArgumentNullException(nameof(http));
-            _urls = urls ?? throw new ArgumentNullException(nameof(urls));
-            if (_urls.Count == 0)
-            {
-                throw new ArgumentException("At least one segment URL is required", nameof(urls));
-            }
-        }
-
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            while (true)
-            {
-                if (_currentStream == null)
-                {
-                    if (!await AdvanceAsync(cancellationToken).ConfigureAwait(false)) return 0;
-                }
-
-                var read = await _currentStream!.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-                if (read > 0) return read;
-                await DisposeCurrentAsync().ConfigureAwait(false);
-            }
-        }
-
-        public override int Read(byte[] buffer, int offset, int count)
-            => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
-
-        private async Task<bool> AdvanceAsync(CancellationToken cancellationToken)
-        {
-            _index++;
-            if (_index >= _urls.Count) return false;
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, _urls[_index]);
-            request.Headers.UserAgent.ParseAdd("Mozilla/5.0");
-            request.Headers.Accept.ParseAdd("*/*");
-
-            _currentResponse = await _http
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                .ConfigureAwait(false);
-            _currentResponse.EnsureSuccessStatusCode();
-            _currentStream = await _currentResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            return true;
-        }
-
-        private async Task DisposeCurrentAsync()
-        {
-            if (_currentStream != null)
-            {
-                await _currentStream.DisposeAsync().ConfigureAwait(false);
-                _currentStream = null;
-            }
-            _currentResponse?.Dispose();
-            _currentResponse = null;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                _currentStream?.Dispose();
-                _currentResponse?.Dispose();
-            }
-            base.Dispose(disposing);
-        }
-
-        public override async ValueTask DisposeAsync()
-        {
-            await DisposeCurrentAsync().ConfigureAwait(false);
-            await base.DisposeAsync().ConfigureAwait(false);
-            GC.SuppressFinalize(this);
-        }
-
-        public override bool CanRead => true;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => throw new NotSupportedException();
-        public override long Position
-        {
-            get => throw new NotSupportedException();
-            set => throw new NotSupportedException();
-        }
-
-        public override void Flush() { }
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    }
 }

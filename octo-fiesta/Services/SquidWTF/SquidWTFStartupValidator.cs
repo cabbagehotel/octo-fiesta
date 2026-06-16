@@ -46,15 +46,6 @@ public class SquidWTFStartupValidator : BaseStartupValidator
             WriteStatus("Instance Timeout", $"{_settings.InstanceTimeoutSeconds}s", ConsoleColor.Cyan);
         }
 
-        if (_settings.Instances is { Count: > 0 })
-        {
-            WriteStatus("Instance Source", $"custom ({_settings.Instances.Count})", ConsoleColor.Cyan);
-        }
-        else if (!string.IsNullOrWhiteSpace(_settings.InstancesUrl))
-        {
-            WriteStatus("Instances URL", _settings.InstancesUrl!, ConsoleColor.Cyan);
-        }
-
         try
         {
             if (source.Equals("Qobuz", StringComparison.OrdinalIgnoreCase))
@@ -99,7 +90,7 @@ public class SquidWTFStartupValidator : BaseStartupValidator
         else
         {
             WriteStatus("SquidWTF API", $"HTTP {(int)response.StatusCode}", ConsoleColor.Yellow);
-            WriteDetail("Service may be freaking unavailable");
+            WriteDetail("Service may be temporarily unavailable");
             return ValidationResult.Failure($"{response.StatusCode}", "SquidWTF returned code");
         }
     }
@@ -137,7 +128,7 @@ public class SquidWTFStartupValidator : BaseStartupValidator
         else
         {
             // Fallback if instance manager not available
-            var response = await _httpClient.GetAsync("https://monochrome-api.samidy.com/", cancellationToken);
+            var response = await _httpClient.GetAsync("https://tidal-api.binimum.org/", cancellationToken);
 
             if (response.IsSuccessStatusCode)
             {

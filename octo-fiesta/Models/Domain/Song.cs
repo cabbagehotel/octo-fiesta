@@ -4,7 +4,13 @@ namespace octo_fiesta.Models.Domain;
 /// Represents a song (local or external)
 /// </summary>
 public class Song
-{    
+{
+    /// <summary>
+    /// Unique ID. For external songs, prefixed with "ext-" + provider + "-" + external id
+    /// Example: "ext-deezer-123456" or "local-789"
+    /// </summary>
+    public string Id { get; set; } = string.Empty;
+    
     public string Title { get; set; } = string.Empty;
     public string Artist { get; set; } = string.Empty;
     public string? ArtistId { get; set; }
@@ -59,11 +65,10 @@ public class Song
     public string? Copyright { get; set; }
     
     /// <summary>
-    /// All performing artists (for multi-artist tracks), with id + name so clients
-    /// can link each one. First entry should match Artist. Used for file tagging
-    /// (Performers field) and the OpenSubsonic `artists` field.
+    /// All performing artists (for multi-artist tracks).
+    /// First entry should match Artist. Used for file tagging (Performers field).
     /// </summary>
-    public List<Artist> Artists { get; set; } = new();
+    public List<string> Artists { get; set; } = new();
     
     /// <summary>
     /// Contributing artists (features, etc.)
@@ -95,9 +100,4 @@ public class Song
     /// 0 = Naturally clean, 1 = Explicit, 2 = Not applicable, 3 = Clean/edited version, 6/7 = Unknown
     /// </summary>
     public int? ExplicitContentLyrics { get; set; }
-
-    /// <summary>
-    /// Album release type (album, single, ep, etc.)
-    /// </summary>
-    public string? ReleaseType { get; set; }
 }

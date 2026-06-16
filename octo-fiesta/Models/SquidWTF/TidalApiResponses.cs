@@ -80,9 +80,7 @@ public class TidalTrack
     
     [JsonPropertyName("title")]
     public string? Title { get; set; }
-    [JsonPropertyName("version")]
-    public string? Version { get; set; }
-
+    
     [JsonPropertyName("duration")]
     public int Duration { get; set; }
     
@@ -139,10 +137,7 @@ public class TidalAlbum
     
     [JsonPropertyName("explicit")]
     public bool Explicit { get; set; }
-
-    [JsonPropertyName("type")]
-    public string? Type { get; set; }
-
+    
     [JsonPropertyName("artist")]
     public TidalArtist? Artist { get; set; }
     
@@ -287,13 +282,6 @@ public class TidalManifest
     
     [JsonPropertyName("urls")]
     public List<string>? Urls { get; set; }
-
-    /// <summary>
-    /// Total media duration in seconds, parsed from the DASH manifest. Null for the legacy
-    /// BTS JSON manifest. Used to patch the fMP4 moov duration (see <see cref="octo_fiesta.Services.Common.Mp4DurationPatcher"/>).
-    /// </summary>
-    [JsonIgnore]
-    public double? DurationSeconds { get; set; }
 }
 
 /// <summary>
@@ -394,10 +382,7 @@ public class TidalAlbumData
     
     [JsonPropertyName("copyright")]
     public string? Copyright { get; set; }
-
-    [JsonPropertyName("type")]
-    public string? Type { get; set; }
-
+    
     [JsonPropertyName("artist")]
     public TidalArtist? Artist { get; set; }
     

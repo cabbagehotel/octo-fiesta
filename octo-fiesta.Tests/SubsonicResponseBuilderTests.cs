@@ -93,6 +93,7 @@ public class SubsonicResponseBuilderTests
         // Arrange
         var song = new Song
         {
+            Id = "song123",
             Title = "Test Song",
             Artist = "Test Artist",
             Album = "Test Album",
@@ -100,9 +101,7 @@ public class SubsonicResponseBuilderTests
             Track = 5,
             Year = 2023,
             Genre = "Rock",
-            LocalPath = "/music/test.mp3",
-            ExternalId = "1234",
-            ExternalProvider = "deezer"
+            LocalPath = "/music/test.mp3"
         };
 
         // Act
@@ -114,7 +113,7 @@ public class SubsonicResponseBuilderTests
         var doc = JsonDocument.Parse(json);
         var songData = doc.RootElement.GetProperty("subsonic-response").GetProperty("song");
         
-        Assert.Equal("ext-deezer-song-1234", songData.GetProperty("id").GetString());
+        Assert.Equal("song123", songData.GetProperty("id").GetString());
         Assert.Equal("Test Song", songData.GetProperty("title").GetString());
         Assert.Equal("Test Artist", songData.GetProperty("artist").GetString());
         Assert.Equal("Test Album", songData.GetProperty("album").GetString());
@@ -126,6 +125,7 @@ public class SubsonicResponseBuilderTests
         // Arrange
         var song = new Song
         {
+            Id = "song123",
             Title = "Test Song",
             Artist = "Test Artist",
             ArtistId = "artist123",
@@ -133,9 +133,7 @@ public class SubsonicResponseBuilderTests
             AlbumId = "album123",
             Duration = 180,
             ReleaseDate = "2023-01-02",
-            IsLocal = true,
-            ExternalId = "1234",
-            ExternalProvider = "deezer"
+            IsLocal = true
         };
 
         // Act
@@ -149,7 +147,7 @@ public class SubsonicResponseBuilderTests
         var ns = doc.Root!.GetDefaultNamespace();
         var songElement = doc.Root!.Element(ns + "song");
         Assert.NotNull(songElement);
-        Assert.Equal("ext-deezer-song-1234", songElement.Attribute("id")?.Value);
+        Assert.Equal("song123", songElement.Attribute("id")?.Value);
         Assert.Equal("Test Song", songElement.Attribute("title")?.Value);
         Assert.Equal("album123", songElement.Attribute("albumId")?.Value);
         Assert.Equal("artist123", songElement.Attribute("artistId")?.Value);
@@ -180,8 +178,8 @@ public class SubsonicResponseBuilderTests
             Year = 2023,
             Songs = new List<Song>
             {
-                new Song { Title = "Song 1", Duration = 180 },
-                new Song { Title = "Song 2", Duration = 200 }
+                new Song { Id = "song1", Title = "Song 1", Duration = 180 },
+                new Song { Id = "song2", Title = "Song 2", Duration = 200 }
             }
         };
 
@@ -212,8 +210,8 @@ public class SubsonicResponseBuilderTests
             SongCount = 2,
             Songs = new List<Song>
             {
-                new Song { Title = "Song 1" },
-                new Song { Title = "Song 2" }
+                new Song { Id = "song1", Title = "Song 1" },
+                new Song { Id = "song2", Title = "Song 2" }
             }
         };
 
@@ -306,9 +304,8 @@ public class SubsonicResponseBuilderTests
         // Arrange
         var song = new Song
         {
-            Title = "Test Song",
-            ExternalId = "1234",
-            ExternalProvider = "deezer"
+            Id = "song123",
+            Title = "Test Song"
             // Other fields are null
         };
 
@@ -321,7 +318,7 @@ public class SubsonicResponseBuilderTests
         var doc = JsonDocument.Parse(json);
         var songData = doc.RootElement.GetProperty("subsonic-response").GetProperty("song");
         
-        Assert.Equal("ext-deezer-song-1234", songData.GetProperty("id").GetString());
+        Assert.Equal("song123", songData.GetProperty("id").GetString());
         Assert.Equal("Test Song", songData.GetProperty("title").GetString());
     }
 

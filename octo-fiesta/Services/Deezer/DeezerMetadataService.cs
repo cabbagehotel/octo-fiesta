@@ -120,34 +120,15 @@ public class DeezerMetadataService : IMusicMetadataService
         var songsTask = SearchSongsAsync(query, songLimit);
         var albumsTask = SearchAlbumsAsync(query, albumLimit);
         var artistsTask = SearchArtistsAsync(query, artistLimit);
-
+        
         await Task.WhenAll(songsTask, albumsTask, artistsTask);
-
-        var songs = await songsTask;
-        var albums = await albumsTask;
-        var artists = await artistsTask;
-
-        // /search/album ranks by popularity — recent releases get pushed past the limit.
-        // For exact artist matches, pull the full discography so latest albums surface.
-        var matchedArtist = artists.FirstOrDefault(a =>
-            string.Equals(a.Name, query, StringComparison.OrdinalIgnoreCase));
-        if (matchedArtist != null && !string.IsNullOrEmpty(matchedArtist.ExternalId))
+        
+        return new SearchResult
         {
-            var discography = await GetArtistAlbumsAsync("deezer", matchedArtist.ExternalId);
-            foreach (var a in discography)
-            {
-                if (string.IsNullOrEmpty(a.Artist)) a.Artist = matchedArtist.Name;
-                if (string.IsNullOrEmpty(a.ArtistId)) a.ArtistId = matchedArtist.Id;
-            }
-
-            var seen = new HashSet<string>(albums.Select(a => a.ExternalId ?? a.Id));
-            foreach (var a in discography)
-            {
-                if (seen.Add(a.ExternalId ?? a.Id)) albums.Add(a);
-            }
-        }
-
-        return new SearchResult { Songs = songs, Albums = albums, Artists = artists };
+            Songs = await songsTask,
+            Albums = await albumsTask,
+            Artists = await artistsTask
+        };
     }
 
     public async Task<Song?> GetSongAsync(string externalProvider, string externalId)
@@ -240,60 +221,7 @@ public class DeezerMetadataService : IMusicMetadataService
         if (albumElement.TryGetProperty("error", out _)) return null;
         
         var album = ParseDeezerAlbum(albumElement);
-
-        // Deezer /album/{id} embeds only the first 25 tracks in tracks.data.
-        // Use the tracklist endpoint and follow pagination to load all tracks.
-        if (albumElement.TryGetProperty("tracklist", out var tracklistEl))
-        {
-            var tracklistUrl = tracklistEl.GetString();
-            if (!string.IsNullOrWhiteSpace(tracklistUrl))
-            {
-                var nextPageUrl = $"{tracklistUrl}?limit=1000";
-                int trackIndex = 1;
-
-                while (!string.IsNullOrWhiteSpace(nextPageUrl))
-                {
-                    var tracklistResponse = await _httpClient.GetAsync(nextPageUrl);
-                    if (!tracklistResponse.IsSuccessStatusCode) break;
-
-                    var tracklistJson = await tracklistResponse.Content.ReadAsStringAsync();
-                    var tracklistElement = JsonDocument.Parse(tracklistJson).RootElement;
-
-                    if (!tracklistElement.TryGetProperty("data", out var pageTracks)) break;
-
-                    foreach (var track in pageTracks.EnumerateArray())
-                    {
-                        // Pass the album artist to ensure proper folder organization
-                        var song = ParseDeezerTrack(track, trackIndex, album.Artist);
-
-                        // Ensure album metadata is set (tracks in album response may not have full album object)
-                        song.Album = album.Title;
-                        song.AlbumId = album.Id;
-                        song.AlbumArtist = album.Artist;
-                        song.Year ??= album.Year;
-                        song.Genre ??= album.Genre;
-                        song.ReleaseType ??= album.ReleaseType;
-                        song.TotalTracks ??= album.SongCount;
-                        song.CoverArtUrl ??= album.CoverArtUrl;
-                        song.CoverArtUrlLarge ??= album.CoverArtUrlLarge;
-
-                        if (ShouldIncludeSong(song))
-                        {
-                            album.Songs.Add(song);
-                        }
-                        trackIndex++;
-                    }
-
-                    nextPageUrl = tracklistElement.TryGetProperty("next", out var nextEl)
-                        ? nextEl.GetString()
-                        : null;
-                }
-
-                return album;
-            }
-        }
-
-        // Fallback for unexpected responses without a tracklist URL.
+        
         // Get album songs
         if (albumElement.TryGetProperty("tracks", out var tracks) &&
             tracks.TryGetProperty("data", out var tracksData))
@@ -303,18 +231,15 @@ public class DeezerMetadataService : IMusicMetadataService
             {
                 // Pass the album artist to ensure proper folder organization
                 var song = ParseDeezerTrack(track, trackIndex, album.Artist);
-
+                
                 // Ensure album metadata is set (tracks in album response may not have full album object)
                 song.Album = album.Title;
                 song.AlbumId = album.Id;
                 song.AlbumArtist = album.Artist;
                 song.Year ??= album.Year;
                 song.Genre ??= album.Genre;
-                song.ReleaseType ??= album.ReleaseType;
                 song.TotalTracks ??= album.SongCount;
-                song.CoverArtUrl ??= album.CoverArtUrl;
-                song.CoverArtUrlLarge ??= album.CoverArtUrlLarge;
-
+                
                 if (ShouldIncludeSong(song))
                 {
                     album.Songs.Add(song);
@@ -322,7 +247,7 @@ public class DeezerMetadataService : IMusicMetadataService
                 trackIndex++;
             }
         }
-
+        
         return album;
     }
 
@@ -387,25 +312,24 @@ public class DeezerMetadataService : IMusicMetadataService
         
         return new Song
         {
+            Id = $"ext-deezer-song-{externalId}",
             Title = track.GetProperty("title").GetString() ?? "",
             Artist = mainArtist,
-            Artists = track.TryGetProperty("artist", out var artistForList)
-                ? new List<Artist> { ParseDeezerArtist(artistForList) }
-                : new List<Artist>(),
-            ArtistId = track.TryGetProperty("artist", out var artistForId)
-                ? $"ext-deezer-artist-{artistForId.GetProperty("id").GetInt64()}"
+            Artists = !string.IsNullOrEmpty(mainArtist) ? new List<string> { mainArtist } : new List<string>(),
+            ArtistId = track.TryGetProperty("artist", out var artistForId) 
+                ? $"ext-deezer-artist-{artistForId.GetProperty("id").GetInt64()}" 
                 : null,
-            Album = track.TryGetProperty("album", out var album)
-                ? album.GetProperty("title").GetString() ?? ""
+            Album = track.TryGetProperty("album", out var album) 
+                ? album.GetProperty("title").GetString() ?? "" 
                 : "",
-            AlbumId = track.TryGetProperty("album", out var albumForId)
-                ? $"ext-deezer-album-{albumForId.GetProperty("id").GetInt64()}"
+            AlbumId = track.TryGetProperty("album", out var albumForId) 
+                ? $"ext-deezer-album-{albumForId.GetProperty("id").GetInt64()}" 
                 : null,
-            Duration = track.TryGetProperty("duration", out var duration)
-                ? duration.GetInt32()
+            Duration = track.TryGetProperty("duration", out var duration) 
+                ? duration.GetInt32() 
                 : null,
             Track = trackNumber,
-            CoverArtUrl = track.TryGetProperty("album", out var albumForCover) &&
+            CoverArtUrl = track.TryGetProperty("album", out var albumForCover) && 
                           albumForCover.TryGetProperty("cover_medium", out var cover)
                 ? cover.GetString()
                 : null,
@@ -473,10 +397,8 @@ public class DeezerMetadataService : IMusicMetadataService
             }
         }
         
-        // Contributors. Deezer lists all performing artists here (with their ids),
-        // so we use them both for the Contributors names and the typed Artists list.
+        // Contributors
         var contributors = new List<string>();
-        var contributorArtists = new List<Artist>();
         if (track.TryGetProperty("contributors", out var contribs))
         {
             foreach (var contrib in contribs.EnumerateArray())
@@ -485,10 +407,7 @@ public class DeezerMetadataService : IMusicMetadataService
                 {
                     var name = contribName.GetString();
                     if (!string.IsNullOrEmpty(name))
-                    {
                         contributors.Add(name);
-                        contributorArtists.Add(ParseDeezerArtist(contrib));
-                    }
                 }
             }
         }
@@ -527,14 +446,11 @@ public class DeezerMetadataService : IMusicMetadataService
         
         return new Song
         {
+            Id = $"ext-deezer-song-{externalId}",
             Title = track.GetProperty("title").GetString() ?? "",
             Artist = mainArtist,
-            Artists = contributorArtists.Count > 0
-                ? contributorArtists
-                : (track.TryGetProperty("artist", out var mainArtistForList)
-                    ? new List<Artist> { ParseDeezerArtist(mainArtistForList) }
-                    : new List<Artist>()),
-            ArtistId = track.TryGetProperty("artist", out var artistForId)
+            Artists = contributors.Count > 0 ? contributors : (!string.IsNullOrEmpty(mainArtist) ? new List<string> { mainArtist } : new List<string>()),
+            ArtistId = track.TryGetProperty("artist", out var artistForId) 
                 ? $"ext-deezer-artist-{artistForId.GetProperty("id").GetInt64()}" 
                 : null,
             Album = track.TryGetProperty("album", out var album) 
@@ -595,9 +511,6 @@ public class DeezerMetadataService : IMusicMetadataService
                     genres.TryGetProperty("data", out var genresData) &&
                     genresData.GetArrayLength() > 0
                 ? genresData[0].GetProperty("name").GetString()
-                : null,
-            ReleaseType = album.TryGetProperty("record_type", out var recordType) 
-                ? recordType.GetString() 
                 : null,
             IsLocal = false,
             ExternalProvider = "deezer",

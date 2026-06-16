@@ -69,9 +69,7 @@ public class QobuzAlbum
     
     [JsonPropertyName("release_date_original")]
     public string? ReleaseDateOriginal { get; set; }
-    [JsonPropertyName("release_type")]
-    public string? ReleaseType { get; set; }
-
+    
     [JsonPropertyName("duration")]
     public int Duration { get; set; }
     

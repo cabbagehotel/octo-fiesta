@@ -4,6 +4,7 @@ using octo_fiesta.Services.Local;
 using octo_fiesta.Models.Settings;
 using Microsoft.Extensions.Options;
 using octo_fiesta.Models.Yandex;
+using System.Xml.Serialization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,8 +14,6 @@ using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.IO;
-using System.Xml.Linq;
-using System.Xml;
 
 namespace octo_fiesta.Services.Yandex;
 
@@ -360,36 +359,15 @@ public class YandexDownloadService : BaseDownloadService
         }
 
         string downloadInfoResponseString = await downloadInfoResponse.Content.ReadAsStringAsync(cancellationToken);
-        XDocument doc;
-        try
+        var xmlSerializer = new XmlSerializer(typeof(YandexDownloadInfoLegacy));
+        using var reader = new StringReader(downloadInfoResponseString);
+        var downloadInfo = (YandexDownloadInfoLegacy?)xmlSerializer.Deserialize(reader);
+        if (downloadInfo is null)
         {
-            doc = XDocument.Parse(downloadInfoResponseString);
-        }
-        catch (XmlException ex)
-        {
-            _logger.LogWarning(ex, "Failed to parse Yandex API XML response for track download info request.");
+            _logger.LogWarning("Failed to deserialize Yandex API response for track download info request.");
             return null;
-        }
-
-        var root = doc.Root;
-        var host = root?.Element("host")?.Value;
-        var path = root?.Element("path")?.Value;
-        var ts = root?.Element("ts")?.Value;
-        var s = root?.Element("s")?.Value;
-
-        if (host is null || path is null || ts is null || s is null)
-        {
-            _logger.LogWarning("Yandex API XML response missing required field for track download info request");
-            return null;
-        }
-
-        var downloadInfo = new YandexDownloadInfoLegacy
-        {
-            Host = host,
-            Path = path,
-            Ts = ts,
-            S = s
         };
+
 
         // Prepare signed download URL
         string stringToSign = MD_SIGNING_SALT + downloadInfo.Path[1..] + downloadInfo.S;

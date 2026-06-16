@@ -29,14 +29,8 @@ public class LocalLibraryService : ILocalLibraryService
     private DateTime _lastScanTrigger = DateTime.MinValue;
     private readonly TimeSpan _scanDebounceInterval = TimeSpan.FromSeconds(30);
     
-    // Primary subsonic auth parameters/credentials from config for server-to-server calls
-    private SubsonicCredentials? _subsonicAdminCredentials;
-
-    // Whether the configured admin has admin rights (null = not checked yet)
-    private bool? _adminIsAdmin;
-
-    // Secondary subsonic auth parameters/credentials for server-to-server calls
-    private SubsonicCredentials? _subsonicUserCredentials;
+    // Stored Subsonic auth parameters for server-to-server calls
+    private Dictionary<string, string>? _subsonicCredentials;
     
     // Whether the captured user has admin rights (null = not checked yet)
     private bool? _userIsAdmin;
@@ -54,14 +48,6 @@ public class LocalLibraryService : ILocalLibraryService
         _metadataService = metadataService;
         _subsonicSettings = subsonicSettings.Value;
         _logger = logger;
-        var adminCredentialsParameters = new Dictionary<string, string>
-        {
-            ["u"] = _subsonicSettings.AdminUsername ?? "",
-            ["p"] = _subsonicSettings.AdminPassword ?? "",
-            ["v"] = "1.16.1",
-            ["c"] = "octo-fiesta"
-        };
-        _subsonicAdminCredentials = SubsonicCredentials.TryFromDictionary(adminCredentialsParameters);
         
         if (!Directory.Exists(_downloadDirectory))
         {
@@ -174,7 +160,7 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
                 return null;
             }
 
-            var authQuery = BuildAuthQuery(_subsonicUserCredentials);
+            var authQuery = BuildAuthQuery();
             var searchUrl = $"{_subsonicSettings.Url}/rest/search3?f=json&songCount=10&albumCount=0&artistCount=0&query={Uri.EscapeDataString(queryText)}{authQuery}";
 
             var response = await _httpClient.GetAsync(searchUrl);
@@ -395,17 +381,17 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
         await File.WriteAllTextAsync(_mappingFilePath, json);
     }
 
-    private async Task<bool> CheckUserIsAdminAsync(SubsonicCredentials? subsonicCredentials)
+    private async Task<bool> CheckUserIsAdminAsync()
     {
         try
         {
-            var authQuery = BuildAuthQuery(subsonicCredentials);
-            if (string.IsNullOrEmpty(authQuery))
+            var authQuery = BuildAuthQuery();
+            if (string.IsNullOrEmpty(authQuery) || _subsonicCredentials == null || !_subsonicCredentials.TryGetValue("u", out var username))
             {
                 return false;
             }
             
-            var url = $"{_subsonicSettings.Url}/rest/getUser?f=json&username={Uri.EscapeDataString(subsonicCredentials!.Username)}{authQuery}";
+            var url = $"{_subsonicSettings.Url}/rest/getUser?f=json&username={Uri.EscapeDataString(username)}{authQuery}";
             var response = await _httpClient.GetAsync(url);
             
             if (!response.IsSuccessStatusCode) return false;
@@ -420,230 +406,63 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
                 var isAdmin = adminRole.GetBoolean();
                 if (!isAdmin)
                 {
-                    _logger.LogDebug("Subsonic user '{User}' has no admin rights", subsonicCredentials.Username);
+                    _logger.LogInformation("Subsonic user '{User}' is not admin, library scan will be skipped", username);
                 }
                 return isAdmin;
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to check user admin rights");
+            _logger.LogWarning(ex, "Failed to check user admin rights, library scan will be skipped");
         }
         
         return false;
     }
 
-    public async Task<List<(string PlaylistId, string PlaylistName)>> FindPlaylistsContainingSongAsync(string songId)
+    private string BuildAuthQuery()
     {
-        var result = new List<(string PlaylistId, string PlaylistName)>();
-
-        if (string.IsNullOrEmpty(songId))
-            return result;
-
-        var authQuery = BuildAuthQuery(_subsonicUserCredentials);
-        if (string.IsNullOrEmpty(authQuery))
-        {
-            _logger.LogWarning("Cannot search playlists: Subsonic credentials not set");
-            return result;
-        }
-
-        try
-        {
-            var playlistsUrl = $"{_subsonicSettings.Url}/rest/getPlaylists?f=json{authQuery}";
-            var response = await _httpClient.GetAsync(playlistsUrl);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Failed to get playlists: {StatusCode}", response.StatusCode);
-                return result;
-            }
-
-            var content = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(content);
-
-            if (!doc.RootElement.TryGetProperty("subsonic-response", out var subResp) ||
-                !subResp.TryGetProperty("playlists", out var playlists) ||
-                !playlists.TryGetProperty("playlist", out var playlistNode))
-                return result;
-
-            foreach (var playlist in EnumerateJsonElements(playlistNode))
-            {
-                var playlistId = playlist.TryGetProperty("id", out var idEl) ? idEl.ToString() : null;
-                var playlistName = playlist.TryGetProperty("name", out var nameEl) ? nameEl.GetString() : null;
-                if (string.IsNullOrEmpty(playlistId)) continue;
-
-                var detailUrl = $"{_subsonicSettings.Url}/rest/getPlaylist?f=json&id={Uri.EscapeDataString(playlistId)}{authQuery}";
-                var detailResponse = await _httpClient.GetAsync(detailUrl);
-                if (!detailResponse.IsSuccessStatusCode) continue;
-
-                var detailContent = await detailResponse.Content.ReadAsStringAsync();
-                using var detailDoc = JsonDocument.Parse(detailContent);
-
-                if (!detailDoc.RootElement.TryGetProperty("subsonic-response", out var subResp2) ||
-                    !subResp2.TryGetProperty("playlist", out var playlistDetail) ||
-                    !playlistDetail.TryGetProperty("entry", out var entries))
-                    continue;
-
-                foreach (var entry in EnumerateJsonElements(entries))
-                {
-                    var entrySongId = entry.TryGetProperty("id", out var songIdEl) ? songIdEl.ToString() : null;
-                    if (entrySongId == songId)
-                    {
-                        result.Add((playlistId, playlistName ?? ""));
-                        break;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to search playlists for song {SongId}", songId);
-        }
-
-        return result;
-    }
-
-    public async Task MigratePlaylistEntriesAsync(string oldSongId, string newSongId, List<(string PlaylistId, string PlaylistName)> affectedPlaylists)
-    {
-        if (oldSongId == newSongId || affectedPlaylists.Count == 0)
-            return;
-
-        var authQuery = BuildAuthQuery(_subsonicUserCredentials);
-        if (string.IsNullOrEmpty(authQuery))
-        {
-            _logger.LogWarning("Cannot migrate playlists: Subsonic credentials not set");
-            return;
-        }
-
-        foreach (var (playlistId, playlistName) in affectedPlaylists)
-        {
-            try
-            {
-                // Re-fetch current playlist state
-                var detailUrl = $"{_subsonicSettings.Url}/rest/getPlaylist?f=json&id={Uri.EscapeDataString(playlistId)}{authQuery}";
-                var detailResponse = await _httpClient.GetAsync(detailUrl);
-                if (!detailResponse.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("Failed to fetch playlist {PlaylistId} for migration: {StatusCode}", playlistId, detailResponse.StatusCode);
-                    continue;
-                }
-
-                var detailContent = await detailResponse.Content.ReadAsStringAsync();
-                using var detailDoc = JsonDocument.Parse(detailContent);
-
-                if (!detailDoc.RootElement.TryGetProperty("subsonic-response", out var subResp) ||
-                    !subResp.TryGetProperty("playlist", out var playlistDetail) ||
-                    !playlistDetail.TryGetProperty("entry", out var entries))
-                    continue;
-
-                var songIds = new List<string>();
-                foreach (var entry in EnumerateJsonElements(entries))
-                {
-                    var id = entry.TryGetProperty("id", out var idEl) ? idEl.ToString() : null;
-                    if (!string.IsNullOrEmpty(id))
-                        songIds.Add(id);
-                }
-
-                if (songIds.Count == 0 || !songIds.Contains(oldSongId))
-                    continue;
-
-                // Build updated list with replacement
-                var updatedSongIds = songIds.Select(id => id == oldSongId ? newSongId : id).ToList();
-
-                // Build updatePlaylist URL: remove all entries + re-add in order
-                var url = $"{_subsonicSettings.Url}/rest/updatePlaylist?f=json&playlistId={Uri.EscapeDataString(playlistId)}";
-                for (var i = 0; i < songIds.Count; i++)
-                    url += $"&songIndexToRemove={i}";
-                foreach (var id in updatedSongIds)
-                    url += $"&songIdToAdd={Uri.EscapeDataString(id)}";
-                url += authQuery;
-
-                var updateResponse = await _httpClient.GetAsync(url);
-                if (updateResponse.IsSuccessStatusCode)
-                {
-                    _logger.LogInformation("Migrated playlist '{PlaylistName}' ({PlaylistId}): replaced song {OldId} with {NewId}",
-                        playlistName, playlistId, oldSongId, newSongId);
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to update playlist '{PlaylistName}' ({PlaylistId}): {StatusCode}",
-                        playlistName, playlistId, updateResponse.StatusCode);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error migrating playlist '{PlaylistName}' ({PlaylistId})", playlistName, playlistId);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Enumerates JSON elements that can be either a single object or an array
-    /// </summary>
-    private static IEnumerable<JsonElement> EnumerateJsonElements(JsonElement node)
-    {
-        if (node.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var element in node.EnumerateArray())
-                yield return element;
-        }
-        else if (node.ValueKind == JsonValueKind.Object)
-        {
-            yield return node;
-        }
-    }
-
-    private string BuildAuthQuery(SubsonicCredentials? credentials)
-    {
-        if (credentials == null)
-        {
+        if (_subsonicCredentials == null || _subsonicCredentials.Count == 0)
             return string.Empty;
-        }
-        var parts = new List<string>
-        {
-            $"u={Uri.EscapeDataString(credentials.Username)}",
-            $"v={Uri.EscapeDataString(credentials.ApiVersion)}",
-            $"c={Uri.EscapeDataString(credentials.ClientName)}"
-        };
-
-        if (!string.IsNullOrWhiteSpace(credentials.Token) && !string.IsNullOrWhiteSpace(credentials.Salt))
-        {
-            parts.Add($"t={Uri.EscapeDataString(credentials.Token)}");
-            parts.Add($"s={Uri.EscapeDataString(credentials.Salt)}");
-        }
-        else if (!string.IsNullOrWhiteSpace(credentials.Password))
-        {
-            parts.Add($"p={Uri.EscapeDataString(credentials.Password)}");
-        }
         
-        return "&" + string.Join("&", parts);
+        var query = string.Join("&", _subsonicCredentials.Select(kv => 
+            $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+        return $"&{query}";
     }
 
     public string GetDownloadDirectory() => _downloadDirectory;
 
     public void SetSubsonicCredentials(Dictionary<string, string> parameters)
     {
-        if (_subsonicUserCredentials != null) return;
+        if (_subsonicCredentials != null) return;
         
-        var credentials = SubsonicCredentials.TryFromDictionary(parameters);
+        var authParams = new[] { "u", "t", "s", "v", "c" };
+        var credentials = new Dictionary<string, string>();
         
-        if (credentials != null)
+        foreach (var key in authParams)
         {
-            _subsonicUserCredentials = credentials;
-            _logger.LogInformation("Subsonic credentials captured for user '{User}'", credentials.Username);
+            if (parameters.TryGetValue(key, out var value) && !string.IsNullOrEmpty(value))
+            {
+                credentials[key] = value;
+            }
         }
-        else
+        
+        if (credentials.ContainsKey("u"))
         {
-            _logger.LogWarning("Failed to capture subsonic credentials from request parameters. Invalid or empty parameters");
+            _subsonicCredentials = credentials;
+            _logger.LogInformation("Subsonic credentials captured for user '{User}'", credentials["u"]);
         }
     }
 
     public async Task<bool> TriggerLibraryScanAsync()
     {
-        var requestCredentials = await ResolveAdminCapableCredentialsAsync();
-        
-        if (requestCredentials == null)
+        // Check admin rights on first call
+        if (_userIsAdmin == null)
         {
-            _logger.LogWarning("Can not trigger library scan due to no available admin credentials");
+            _userIsAdmin = await CheckUserIsAdminAsync();
+        }
+        
+        if (_userIsAdmin == false)
+        {
             return false;
         }
         
@@ -660,7 +479,7 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
         
         try
         {
-            var authQuery = BuildAuthQuery(requestCredentials);
+            var authQuery = BuildAuthQuery();
             var url = $"{_subsonicSettings.Url}/rest/startScan?f=json{authQuery}";
             
             _logger.LogInformation("Triggering Subsonic library scan...");
@@ -675,7 +494,7 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
             }
             else
             {
-                _logger.LogWarning("Failed to trigger Subsonic scan: {StatusCode}", response.StatusCode);
+                _logger.LogWarning("Failed to trigger Subsonic scan: {StatusCode} - Server may require authentication", response.StatusCode);
                 return false;
             }
         }
@@ -692,12 +511,7 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
         {
             // Note: This endpoint works without authentication on most Subsonic/Navidrome servers
             // when called from localhost.
-            // current behavior: tries to find admin credentials otherwise tries with not admin credentials
-            var requestCredentials = await ResolveAdminCapableCredentialsAsync();
-
-            if (requestCredentials == null) requestCredentials = _subsonicUserCredentials;
-
-            var authQuery = BuildAuthQuery(requestCredentials);
+            var authQuery = BuildAuthQuery();
             var url = $"{_subsonicSettings.Url}/rest/getScanStatus?f=json{authQuery}";
             
             var response = await _httpClient.GetAsync(url);
@@ -756,33 +570,6 @@ public async Task RegisterDownloadedSongAsync(Song song, string localPath, strin
         }
 
         _logger.LogWarning("Timed out while waiting for library scan to finish");
-    }
-
-    private async Task<SubsonicCredentials?> ResolveAdminCapableCredentialsAsync()
-    {
-        // Check admin rights on first call
-        if (_adminIsAdmin == null)
-        {
-            _adminIsAdmin = await CheckUserIsAdminAsync(_subsonicAdminCredentials);
-        }
-
-        if (_userIsAdmin == null)
-        {
-            _userIsAdmin = await CheckUserIsAdminAsync(_subsonicUserCredentials);
-        }
-
-        if (_subsonicAdminCredentials != null && _adminIsAdmin == true)
-        {
-            return _subsonicAdminCredentials;
-        }
-        else if (_subsonicUserCredentials != null && _userIsAdmin == true)
-        {
-            return _subsonicUserCredentials;
-        }
-        else
-        {
-            return null;
-        }
     }
 }
 
