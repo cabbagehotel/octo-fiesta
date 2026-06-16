@@ -90,7 +90,7 @@ public class SquidWTFStartupValidator : BaseStartupValidator
     {
         // Add a standard User-Agent header to mimic a browser
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        
+
         var response = await _httpClient.GetAsync("https://qobuz.kennyy.com.br/api/get-music?q=test&offset=0", cancellationToken);
 
         if (response.IsSuccessStatusCode)
@@ -102,7 +102,7 @@ public class SquidWTFStartupValidator : BaseStartupValidator
         else
         {
             WriteStatus("SquidWTF API", $"HTTP {(int)response.StatusCode}", ConsoleColor.Yellow);
-            WriteDetail("Service may be temporarily unavailable");
+            WriteDetail("Service may be freaking unavailable");
             return ValidationResult.Failure($"{response.StatusCode}", "SquidWTF returned code");
         }
     }
